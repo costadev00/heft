@@ -438,6 +438,13 @@ def generate_argparser():
     parser.add_argument("--showGantt", 
                         help="Switch used to enable display of the final scheduled Gantt chart", 
                         dest="showGantt", action="store_true")
+    # EDP-related options
+    parser.add_argument("--op_mode",
+                        help="Processor assignment objective: EFT (time), EDP RELATIVE, or EDP ABSOLUTE",
+                        type=OpMode, default=OpMode.EFT, dest="op_mode", choices=list(OpMode))
+    parser.add_argument("--power_file",
+                        help="CSV file with per-(task,processor) power values required for EDP modes or RankMetric.EDP",
+                        type=str, default=None)
     return parser
 
 if __name__ == "__main__":
@@ -462,7 +469,26 @@ if __name__ == "__main__":
     else:
         communication_startup = np.zeros(communication_matrix.shape[0])
 
-    processor_schedules, _, _ = schedule_dag(dag, communication_matrix=communication_matrix, communication_startup=communication_startup, computation_matrix=computation_matrix, rank_metric=args.rank_metric)
+    # Power dictionary is required for EDP modes or RankMetric.EDP
+    power_dict = None
+    if args.power_file is not None:
+        power_dict = readCsvToDict(args.power_file)
+
+    if (args.op_mode in [OpMode.EDP_ABS, OpMode.EDP_REL] or args.rank_metric == RankMetric.EDP) and power_dict is None:
+        logger.error("EDP modes or RankMetric.EDP require --power_file specifying a task-by-processor power CSV")
+        sys.exit(2)
+
+    kwargs = { 'rank_metric': args.rank_metric, 'op_mode': args.op_mode }
+    if power_dict is not None:
+        kwargs['power_dict'] = power_dict
+
+    processor_schedules, _, _ = schedule_dag(
+        dag,
+        communication_matrix=communication_matrix,
+        communication_startup=communication_startup,
+        computation_matrix=computation_matrix,
+        **kwargs
+    )
     for proc, jobs in processor_schedules.items():
         logger.info(f"Processor {proc} has the following jobs:")
         logger.info(f"\t{jobs}")
