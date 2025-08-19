@@ -365,6 +365,84 @@ def _compute_eft(_self, dag, node, proc):
     logger.debug(f"\tFor node {node} on processor {proc}, the EFT is {min_schedule}")
     return min_schedule    
 
+def _compute_makespan_and_idle(proc_schedules):
+    """
+    Compute makespan and total idle time across processors within [0, makespan].
+    Idle per processor includes: initial idle before first job, gaps between jobs, and tail idle to makespan.
+    Returns (makespan: float, total_idle: float, per_proc_idle: dict[int,float]).
+    """
+    # Makespan is the max job end across all processors
+    makespan = 0.0
+    for jobs in proc_schedules.values():
+        for job in jobs:
+            try:
+                end_t = float(job.end)
+            except Exception:
+                end_t = job.end
+            if end_t > makespan:
+                makespan = end_t
+
+    total_idle = 0.0
+    per_proc_idle = {}
+    for proc, jobs in proc_schedules.items():
+        # Sort by start time to find gaps
+        jobs_sorted = sorted(jobs, key=lambda j: float(j.start))
+        idle = 0.0
+        if len(jobs_sorted) == 0:
+            idle = makespan
+        else:
+            # Idle before first job
+            idle += max(0.0, float(jobs_sorted[0].start) - 0.0)
+            # Gaps between jobs
+            for i in range(len(jobs_sorted) - 1):
+                idle += max(0.0, float(jobs_sorted[i+1].start) - float(jobs_sorted[i].end))
+            # Tail idle to makespan
+            idle += max(0.0, makespan - float(jobs_sorted[-1].end))
+        per_proc_idle[proc] = idle
+        total_idle += idle
+
+    return makespan, total_idle, per_proc_idle
+
+def _compute_load_balance(proc_schedules):
+    """
+    Compute load-balancing metrics from busy time per processor.
+    Returns:
+      per_proc_busy: dict[int,float]
+      cv: coefficient of variation of busy time (std/mean)
+      imbalance_ratio: max(busy)/min(busy) (inf if any min==0 while max>0)
+      fairness: Jain's fairness index in [0,1]
+    """
+    per_proc_busy = {}
+    for proc, jobs in proc_schedules.items():
+        busy = 0.0
+        for j in jobs:
+            busy += float(j.end) - float(j.start)
+        per_proc_busy[proc] = busy
+
+    busy_values = list(per_proc_busy.values())
+    n = len(busy_values)
+    if n == 0:
+        return per_proc_busy, 0.0, 1.0, 1.0
+
+    total_busy = sum(busy_values)
+    mean_busy = total_busy / n
+    # population std
+    variance = sum((b - mean_busy) ** 2 for b in busy_values) / n
+    std_busy = variance ** 0.5
+    cv = (std_busy / mean_busy) if mean_busy > 0 else 0.0
+
+    max_busy = max(busy_values) if busy_values else 0.0
+    min_busy = min(busy_values) if busy_values else 0.0
+    if max_busy == 0 and min_busy == 0:
+        imbalance_ratio = 1.0
+    else:
+        imbalance_ratio = (max_busy / min_busy) if min_busy > 0 else float('inf')
+
+    denom = n * sum(b * b for b in busy_values)
+    fairness = (total_busy ** 2 / denom) if denom > 0 else 1.0
+
+    return per_proc_busy, cv, imbalance_ratio, fairness
+
 def readCsvToNumpyMatrix(csv_file):
     """
     Given an input file consisting of a comma separated list of numeric values with a single header row and header column, 
@@ -438,6 +516,9 @@ def generate_argparser():
     parser.add_argument("--showGantt", 
                         help="Switch used to enable display of the final scheduled Gantt chart", 
                         dest="showGantt", action="store_true")
+    parser.add_argument("--report",
+                        help="Print a report with makespan and idle time metrics",
+                        dest="report", action="store_true")
     # EDP-related options
     parser.add_argument("--op_mode",
                         help="Processor assignment objective: EFT (time), EDP RELATIVE, or EDP ABSOLUTE",
@@ -492,5 +573,20 @@ if __name__ == "__main__":
     for proc, jobs in processor_schedules.items():
         logger.info(f"Processor {proc} has the following jobs:")
         logger.info(f"\t{jobs}")
+    if args.report:
+        makespan, total_idle, per_proc_idle = _compute_makespan_and_idle(processor_schedules)
+        per_proc_busy, lb_cv, lb_imbalance, lb_fairness = _compute_load_balance(processor_schedules)
+        logger.info("")
+        logger.info(f"Makespan: {makespan}")
+        logger.info(f"Total idle time (sum over processors within [0, makespan]): {total_idle}")
+        for proc, idle in sorted(per_proc_idle.items()):
+            logger.info(f"  Idle time on processor {proc}: {idle}")
+        logger.info("Load Balancing:")
+        for proc, busy in sorted(per_proc_busy.items()):
+            logger.info(f"  Busy time on processor {proc}: {busy}")
+        logger.info(f"  Coefficient of variation (busy): {lb_cv}")
+        logger.info(f"  Imbalance ratio (max/min busy): {lb_imbalance}")
+        logger.info(f"  Jain's fairness index: {lb_fairness}")
+
     if args.showGantt:
         showGanttChart(processor_schedules)
